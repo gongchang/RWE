@@ -1,0 +1,844 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+```
+####
+#purpose: time to treatment discontinuation for potential control arm (single treatment) treatment post-CDK4/6i
+#(1) start and end dates are the min and max of the episodedate of each drug
+#(2) use the orals and drug episdoe table together for CDK4/6i to account for the adjuvant setting (at least in Flatiron annotations)
+#     Get the MinEndDate (earlies CDK4/6i EndDate) and look treatments after this MinEndData of CDK4/6i
+#(3) Filter patients that are ER+ HER2- (ER+ and Her2-, right before the treatment start date )
+#(4) ECOG[0 or 1 is our inclusion crieria], PR (needs to be right before the treatment start date)
+##I think (3) and (4) can be accomplished by joining the drug episode table with respective tables, subtract the dates and filter by the smallest difference to obtain the most recent biomarker status before the treatment
+#(5)prior cytotoxic chemotherapy
+#(6)censoring/uncensoring according to Flatiron rules;uncensored patients:
+#(6.1) Identify patients who have advanced to a new LOT since the last drug episode.
+#(6.2) Identify patients who have not advanced to a new LOT, but have a recorded date of death
+#(6.3) Identify patients who have not advanced to a new LOT and have no recorded date of death, but have confirmed structured activity date more than 120 days after the last drug episode for the drug of interest.
+#With 6.1-6.3, the other patients that are not uncensored are censored.
+
+##additional points for stratification considerations: academic setting; lab results relevant for organ function (one of our inclusion criteria)
+
+```{r}
+dir()
+```
+
+```{r}
+dir("MetastaticBreast/")
+```
+
+```{r}
+biomarkers <- read.csv("MetastaticBreast/Enhanced_MetBreastBiomarkers.txt",sep="|")
+biomarkers[1:3,]
+```
+
+
+
+```{r}
+visit <- read.csv("MetastaticBreast/Visit.txt",sep="|")
+visit[1:3,]
+```
+
+```{r}
+mortality <- read.csv("MetastaticBreast/Enhanced_Mortality_V2.txt",sep="|")
+mortality[1:3,]
+```
+
+```{r}
+ecog <- read.csv("MetastaticBreast/ECOG.txt",sep="|")
+ecog[1:3,]
+```
+
+```{r}
+demographics <- read.csv("MetastaticBreast/Demographics.txt",sep="|")
+demographics[1:3,]
+```
+
+
+```{r}
+orals<- read.csv("MetastaticBreast/Enhanced_MetBreast_Orals.txt",sep="|")
+orals[1:3,]
+```
+
+```{r}
+cdki <- c("ribociclib","abemaciclib","palbociclib")
+```
+
+```{r}
+orals_cdki<- orals[orals$DrugName %in% cdki,]
+orals_cdki
+```
+
+```{r}
+drugs <- read.csv("MetastaticBreast/DrugEpisode.txt",sep="|")
+drugs[1:3,]
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+```
+
+```{r}
+library(lubridate)
+library(zoo)
+```
+
+```{r}
+colnames(orals_cdki)
+```
+
+```{r}
+colnames(drugs)
+```
+
+```{r}
+episode_cdki <-unique(drugs[drugs$DrugName %in% cdki,c("PatientID","DrugName","EpisodeDate","EpisodeDate")])
+colnames(episode_cdki) <- c("PatientID","DrugName","StartDate","EndDate")
+all_cdki <- rbind(orals_cdki[,c("PatientID","DrugName","StartDate","EndDate")],episode_cdki)
+```
+
+
+```{r}
+all_cdki %>%
+  group_by(PatientID) %>%
+  summarise(n=n()) %>%
+  filter(n>2)
+```
+
+
+
+```{r}
+#orals_cdki_min_msx <- 
+earliest_cdki <-  all_cdki %>%
+  group_by(PatientID) %>%
+  slice(which.min(as.zoo(EndDate))) %>%
+  rename(MinEndDate=EndDate,MinStartDate=StartDate)
+earliest_cdki
+```
+
+```{r}
+#write.table(earliest_cdki,file="earliest_cdk4_6_i_treatment_dates.tab",sep="\t",row.names = FALSE)
+```
+
+
+```{r}
+all_cdki[all_cdki$PatientID %in% c("F0025149BCB95"),]
+```
+
+```{r}
+earliest_cdki[earliest_cdki$PatientID %in% c("F0025149BCB95"),]
+```
+
+
+
+```{r}
+pts_orals_cdki <- unique(all_cdki$PatientID)
+length(pts_orals_cdki)
+```
+
+
+```{r}
+drugnames<- unique(drugs$DrugName)
+drugnames
+```
+
+```{r}
+c("anastrozole","letrozole","exemestane","vorozole","formestane","fadrozole") %in% drugnames
+```
+
+```{r}
+c("tamoxifen","fulvestrant","faslodex") %in% drugnames
+```
+
+```{r}
+control_drugs <- c("anastrozole","letrozole","exemestane","tamoxifen","fulvestrant")
+```
+
+
+```{r}
+library(stringr)
+is_combo_with_cdki <-function(line_name){
+  items<- as.vector(str_split(line_name,",")[[1]])
+  if (length(intersect(c("Anastrozole","Letrozole","Exemestane","Tamoxifen","Fulvestrant"),items))>=1 & length(intersect(c("Palbociclib","Ribociclib","Abemaciclib"),items))>=1) {return("YES")}
+  else {return("NO")}
+}
+is_combo_with_cdki("Clinical Study Drug,Letrozole,Ribociclib")
+```
+
+##the following number is expected; the drugepisode table only contains drugs annoated in the "metastatic" setting while the orals table contains drug info from pre-metastatic setting including adjuvant settings (but in the defined list of drugs)
+```{r}
+ptids_drugepisode_table_cdki <- unique(drugs[drugs$DrugName %in% cdki,]$PatientID)
+length(ptids_drugepisode_table_cdki)
+```
+
+```{r}
+##Yep everyone in the drug episdoe table is included in the orals table
+unique(ptids_drugepisode_table_cdki %in% pts_orals_cdki)
+```
+
+```{r}
+drugepisodes_cdki <- drugs[drugs$PatientID %in% pts_orals_cdki,]
+```
+
+
+```{r}
+drugepisodes_cdki$IsComboWithCDKi <- sapply(drugepisodes_cdki$LineName,is_combo_with_cdki)
+```
+
+```{r}
+drugepisodes_cdki
+```
+
+```{r}
+uniq_linenames<- unique(drugepisodes_cdki$LineName)
+length(uniq_linenames)
+```
+
+```{r}
+"Fulvestrant,Palbociclib" %in% uniq_linenames
+"Palbociclib,Fulvestrant" %in% uniq_linenames
+```
+
+```{r}
+linename_for_plot <- unique(drugepisodes_cdki[drugepisodes_cdki$DrugName %in% control_drugs,c("PatientID","LineName","DrugName","IsComboWithCDKi")]) %>%
+  group_by(LineName,IsComboWithCDKi,DrugName) %>%
+  summarise(n=n()) %>%
+  arrange(-n)
+linename_for_plot
+```
+
+
+```{r,fig.height=4,fig.width=6}
+ggplot(linename_for_plot[linename_for_plot$n>100,]) +geom_point(aes(y=LineName,x=n)) +facet_wrap(~IsComboWithCDKi+DrugName,nrow = 2) + scale_x_continuous(trans="log10") #+theme(axis.text.y = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r,fig.height=4,fig.width=6}
+ggplot(linename_for_plot[linename_for_plot$n>50,]) +geom_point(aes(y=LineName,x=n)) +facet_wrap(~IsComboWithCDKi+DrugName,nrow = 2) + scale_x_continuous(trans="log10") #+theme(axis.text.y = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+```{r,fig.height=8,fig.width=6}
+ggplot(linename_for_plot[linename_for_plot$n>20,]) +geom_point(aes(y=LineName,x=n)) +facet_wrap(~IsComboWithCDKi+DrugName,nrow = 2) + scale_x_continuous(trans="log10") #+theme(axis.text.y = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r}
+earliest_cdki
+```
+
+```{r}
+length(unique(drugepisodes_cdki$PatientID))
+```
+
+```{r}
+earliest_cdki
+```
+
+
+```{r}
+drugepisodes_cdki<- merge(drugepisodes_cdki,unique(earliest_cdki[,c("PatientID","MinEndDate")]),by="PatientID")
+```
+
+```{r}
+drugepisodes_cdki
+```
+
+
+```{r}
+drugepisodes_cdki[1:500,]
+```
+
+#as.Date is giving this error
+#Error: Evaluation error: character string is not in a standard unambiguous format.
+#while ymd from lubridate works like a charm
+
+```{r}
+#Testing_code: works!! the key is the Date data type, otherwise all kinds of errors
+# episode_dates_cdki<- drugepisodes_cdki[1:500,] %>%
+#   group_by(PatientID,LineNumber,DrugName) %>%
+#   mutate(MinEpisodeDate = min(ymd(EpisodeDate)),MaxEpisodeDate = max(ymd(EpisodeDate))) %>%
+#   mutate(EpisodeDiffDays=MaxEpisodeDate-MinEpisodeDate,DiffDaysWithCDKi=MinEpisodeDate-ymd(MinEndDate)) %>%
+#   ungroup()
+```
+
+
+
+
+```{r}
+episode_dates_cdki<- drugepisodes_cdki %>%
+  group_by(PatientID,LineNumber,DrugName) %>%
+  mutate(MinEpisodeDate = min(ymd(EpisodeDate)),MaxEpisodeDate = max(ymd(EpisodeDate))) %>%
+  mutate(EpisodeDiffDays=MaxEpisodeDate-MinEpisodeDate,DiffDaysWithCDKi=MinEpisodeDate-ymd(MinEndDate)) %>%
+  ungroup()
+```
+
+
+
+```{r}
+episode_dates_cdki[episode_dates_cdki$PatientID=="F002232E52A6F",]
+```
+
+
+
+
+```{r}
+#write.table(episode_dates_cdki,file="Episode_data_for_all_patients_received_CDK4_6i.tab",sep="\t",row.names = FALSE)
+```
+
+```{r}
+colnames(episode_dates_cdki)
+```
+
+
+#Pick the control arm drug as a monotherapy
+#Pick the control arg drug after CDK4/6i
+```{r}
+data_for_control_arm <- episode_dates_cdki[(episode_dates_cdki$LineName %in% c("Fulvestrant","Tamoxifen","Anastrozole","Letrozole","Exemestane")) & episode_dates_cdki$DiffDaysWithCDKi>0 ,] %>%
+  select(PatientID,LineName,LineNumber,LineStartDate,LineEndDate,DrugName,MinEndDate,MinEpisodeDate,MaxEpisodeDate,EpisodeDiffDays,DiffDaysWithCDKi) %>%
+  distinct()
+```
+
+```{r}
+#write.table(data_for_control_arm,file="Episode_data_for_all_patients_received_CDK4_6i_and_control_arm_drug_aferwards_as_monotherapy.tab",sep="\t",row.names = FALSE)
+```
+
+
+
+```{r}
+data_for_control_arm_not_only_monotherapy <- episode_dates_cdki[episode_dates_cdki$DrugName %in% control_drugs & episode_dates_cdki$DiffDaysWithCDKi>0,] %>%
+  select(PatientID,LineName,LineNumber,LineStartDate,LineEndDate,DrugName,MinEndDate,MinEpisodeDate,MaxEpisodeDate,EpisodeDiffDays,DiffDaysWithCDKi) %>%
+  distinct()
+#write.table(data_for_control_arm_not_only_monotherapy,file="Episode_data_for_all_patients_received_CDK4_6i_and_control_arm_drug_aferwards_NotOnlyMonotherapy.tab",sep="\t",row.names = FALSE)
+```
+
+```{r}
+data_for_control_arm <- na.omit(data_for_control_arm)
+#length(test1$PatientID)
+```
+
+
+```{r}
+length(data_for_control_arm$PatientID)
+```
+
+```{r}
+length(unique((data_for_control_arm$PatientID)))
+```
+
+```{r}
+ptids_with_control_arm_data <- unique((data_for_control_arm$PatientID))
+```
+
+```{r}
+data_for_control_arm$CompPatientID <- paste(data_for_control_arm$PatientID,data_for_control_arm$LineNumber,data_for_control_arm$LineName,sep="_")
+```
+
+```{r}
+mortality
+```
+
+```{r}
+ecog
+```
+
+```{r}
+biomarkers
+```
+
+```{r}
+colnames(episode_dates_cdki)
+```
+
+```{r}
+unique(episode_dates_cdki$DrugCategory)
+```
+
+```{r}
+unique(episode_dates_cdki$DetailedDrugCategory)
+```
+
+
+```{r}
+colnames(data_for_control_arm)
+```
+
+
+#closest ecog value before the drug treatment
+```{r}
+closest_ecog<- ecog[ecog$PatientID %in% ptids_with_control_arm_data,] %>%
+  inner_join(data_for_control_arm[,c("CompPatientID","PatientID","MinEpisodeDate")],by="PatientID") %>%
+  filter(ymd(MinEpisodeDate)-ymd(EcogDate)>0) %>%
+  group_by(CompPatientID) %>%
+  slice(which.max(ymd(EcogDate)))
+closest_ecog
+```
+
+
+
+```{r}
+colnames(drugepisodes_cdki)
+```
+
+
+
+##use this closese_chemo code chunk to define prior lines of chemotherapy
+```{r}
+earliest_chemo <- drugepisodes_cdki[drugepisodes_cdki$PatientID %in% ptids_with_control_arm_data,] %>%
+  filter(DetailedDrugCategory=="chemotherapy") %>%
+  group_by(PatientID,LineNumber) %>%
+  mutate(EarliestChemoDate = min(ymd(EpisodeDate))) %>%
+  ungroup()
+closest_chemo<- earliest_chemo[earliest_chemo$PatientID %in% ptids_with_control_arm_data,] %>%
+  inner_join(data_for_control_arm[,c("CompPatientID","PatientID","MinEpisodeDate")],by="PatientID") %>%
+  filter(ymd(MinEpisodeDate)-ymd(EarliestChemoDate)>0) %>%
+  select(PatientID,CompPatientID,MinEpisodeDate,EarliestChemoDate,LineNumber,LineName) %>%
+  distinct() %>%
+  group_by(CompPatientID) %>%
+  mutate(PriorLineOfChemo=n()) %>%
+  ungroup() 
+closest_chemo
+```
+
+```{r}
+colnames(closest_chemo)
+```
+
+```{r}
+#write.table(closest_chemo,file="closest_chemo.tab",sep="\t",row.names = FALSE)
+```
+
+
+```{r}
+colnames(biomarkers)
+```
+
+
+
+```{r}
+unique(biomarkers$BiomarkerName)
+```
+
+```{r}
+unique(biomarkers[biomarkers$BiomarkerName=="ER",]$BiomarkerStatus)
+```
+
+```{r}
+unique(biomarkers[biomarkers$BiomarkerName=="PR",]$BiomarkerStatus)
+```
+
+```{r}
+unique(biomarkers[biomarkers$BiomarkerName=="HER2",]$BiomarkerStatus)
+```
+
+```{r}
+colnames(biomarkers)
+```
+
+#closest_er
+
+```{r}
+closest_er<- biomarkers[biomarkers$PatientID %in% ptids_with_control_arm_data & biomarkers$BiomarkerName=="ER" & biomarkers$BiomarkerStatus %in% c("Positive","Negative"),] %>%
+  inner_join(data_for_control_arm[,c("CompPatientID","PatientID","MinEpisodeDate")],by="PatientID") %>%
+  filter(ymd(MinEpisodeDate)-ymd(SpecimenCollectedDate)>0) %>%
+  group_by(CompPatientID) %>%
+  slice(which.max(ymd(SpecimenCollectedDate)))
+closest_er
+```
+#closest_pr
+
+```{r}
+closest_pr<- biomarkers[biomarkers$PatientID %in% ptids_with_control_arm_data & biomarkers$BiomarkerName=="PR" & biomarkers$BiomarkerStatus %in% c("Positive","Negative"),] %>%
+  inner_join(data_for_control_arm[,c("CompPatientID","PatientID","MinEpisodeDate")],by="PatientID") %>%
+  filter(ymd(MinEpisodeDate)-ymd(SpecimenCollectedDate)>0) %>%
+  group_by(CompPatientID) %>%
+  slice(which.max(ymd(SpecimenCollectedDate)))
+closest_pr
+```
+
+#all_posible_er (ER+ at any given time)
+```{r}
+all_er_pos<- biomarkers[biomarkers$PatientID %in% ptids_with_control_arm_data & biomarkers$BiomarkerName=="ER" & biomarkers$BiomarkerStatus %in% c("Positive"),] %>%
+  inner_join(data_for_control_arm[,c("CompPatientID","PatientID","MinEpisodeDate")],by="PatientID") 
+all_er_pos
+```
+
+```{r}
+unique(biomarkers[biomarkers$BiomarkerName=="HER2",]$BiomarkerStatus)
+```
+
+
+closest_her2 (Equivocal is uncertain; let's get rid of it)
+```{r}
+her2_sub <- biomarkers[biomarkers$BiomarkerName=="HER2" & biomarkers$PatientID %in% ptids_with_control_arm_data,]
+her2_sub$HER2Status <- "Unknown"
+her2_sub[her2_sub$BiomarkerStatus %in% c("IHC negative (0-1+)","Negative NOS","FISH negative/not amplified","NGS negative (ERBB2 not amplified)"),]$HER2Status <- "Negative"
+##"FISH equivocal","IHC equivocal (2+)","NGS equivocal (ERBB2 amplification equivocal)","Equivocal NOS"
+her2_sub[her2_sub$BiomarkerStatus %in% c("IHC positive (3+)","NGS positive (ERBB2 amplified)","FISH positive/amplified","Positive NOS"),]$HER2Status <- "Positive"
+
+closest_her2<- her2_sub[her2_sub$HER2Status %in% c("Positive","Negative"),] %>%
+  inner_join(data_for_control_arm[,c("CompPatientID","PatientID","MinEpisodeDate")],by="PatientID") %>%
+  filter(ymd(MinEpisodeDate)-ymd(SpecimenCollectedDate)>0) %>%
+  group_by(CompPatientID) %>%
+  slice(which.max(ymd(SpecimenCollectedDate)))
+closest_her2
+```
+
+```{r}
+colnames(closest_chemo)
+```
+
+```{r}
+colnames(closest_ecog)
+```
+
+```{r}
+colnames(closest_her2)
+```
+
+```{r}
+closest_er$ERStatus <- closest_er$BiomarkerStatus
+closest_pr$PRStatus <- closest_pr$BiomarkerStatus
+all_er_pos$ERPositiveAtAnyTimepoint <- all_er_pos$BiomarkerStatus
+```
+
+```{r}
+colnames(all_er_pos)
+```
+
+```{r}
+colnames(closest_chemo)
+```
+
+
+```{r}
+data_for_control_arm_with_stratify <- data_for_control_arm %>% 
+  left_join(unique(closest_chemo[,c("CompPatientID","PriorLineOfChemo")]),by="CompPatientID") %>%
+  left_join(unique(closest_ecog[,c("CompPatientID","EcogDate","EcogValue")]),by="CompPatientID") %>%
+  left_join(unique(closest_her2[,c("CompPatientID","HER2Status")]),by="CompPatientID") %>%
+  left_join(unique(closest_er[,c("CompPatientID","ERStatus")]),by="CompPatientID") %>%
+  left_join(unique(closest_pr[,c("CompPatientID","PRStatus")]),by="CompPatientID") %>%
+  left_join(unique(all_er_pos[,c("CompPatientID","ERPositiveAtAnyTimepoint")]),by="CompPatientID")
+data_for_control_arm_with_stratify
+```
+
+```{r}
+data_for_control_arm_with_stratify[is.na(data_for_control_arm_with_stratify$PriorLineOfChemo),]$PriorLineOfChemo <- 0
+```
+
+
+```{r}
+#write.table(data_for_control_arm_with_stratify,file="data_for_control_arm_monotherapy_with_stratification_factors.tab",sep="\t",row.names = FALSE)
+```
+
+```{r}
+length(unique(data_for_control_arm_with_stratify$CompPatientID))
+```
+
+```{r}
+length(unique(data_for_control_arm$PatientID))
+```
+
+#These 5 patients has more than 1 rows;
+#from my checking below, it looks like it is due to that fact that the LineName does not agree with DrugName
+#I probably will use a equal operation to enforce it (lowcase letter in the drugname)
+```{r}
+data_for_control_arm_with_stratify %>%
+  group_by(CompPatientID) %>%
+  summarise(n=n()) %>%
+  filter(n>1)
+```
+
+```{r}
+nrow(data_for_control_arm)
+```
+
+
+```{r}
+data_for_control_arm_with_stratify[data_for_control_arm_with_stratify$CompPatientID=="F3EDC1381E8D6_2_Letrozole",]
+```
+
+```{r}
+data_for_control_arm_with_stratify[data_for_control_arm_with_stratify$CompPatientID=="F596F73BB11D7_3_Tamoxifen",]
+```
+
+#censoring
+#for the survial package in R
+#0 for censored subjects, and 1 for patients with events
+##(6)censoring/uncensoring according to Flatiron rules;uncensored patients:
+#(6.1) Identify patients who have advanced to a new LOT since the last drug episode.
+#(6.2) Identify patients who have not advanced to a new LOT, but have a recorded date of death
+#(6.3) Identify patients who have not advanced to a new LOT and have no recorded date of death, but have confirmed structured activity date more than 120 days after the last drug episode for the drug of interest.
+#With 6.1-6.3, the other patients that are not uncensored are censored.
+
+```{r}
+colnames(episode_dates_cdki)
+```
+
+
+```{r}
+colnames(data_for_control_arm_with_stratify)
+```
+
+
+```{r}
+# check_new_lot<- episode_dates_cdki[episode_dates_cdki$PatientID %in% ptids_with_control_arm_data,] %>%
+#   group_by(PatientID) %>%
+#   slice(which.max(as.numeric(LineNumber))) %>%
+#   ungroup() %>%
+#   rename(MaxLineNumber=LineNumber) %>%
+#   inner_join(data_for_control_arm_with_stratify,by="PatientID") %>%
+#   filter(MaxLineNumber>LineNumber)
+# write.table(check_new_lot,file="check_new_lot.txt",sep="\t",row.names = FALSE)
+```
+
+#patients with new LoT after our drug of interest
+```{r}
+comp_ptids_with_new_lot<- episode_dates_cdki[episode_dates_cdki$PatientID %in% ptids_with_control_arm_data,] %>%
+  group_by(PatientID) %>%
+  slice(which.max(as.numeric(LineNumber))) %>%
+  ungroup() %>%
+  rename(MaxLineNumber=LineNumber) %>%
+  inner_join(data_for_control_arm_with_stratify,by="PatientID") %>%
+  filter(MaxLineNumber>LineNumber) %>%
+  select(CompPatientID) %>%
+  distinct()
+```
+
+```{r}
+colnames(mortality)
+```
+
+#patients has no new Lot but has death dates
+```{r}
+comp_ptids_with_no_lot_but_death<- episode_dates_cdki[episode_dates_cdki$PatientID %in% ptids_with_control_arm_data,] %>%
+  group_by(PatientID) %>%
+  slice(which.max(as.numeric(LineNumber))) %>%
+  ungroup() %>%
+  rename(MaxLineNumber=LineNumber) %>%
+  inner_join(data_for_control_arm_with_stratify,by="PatientID") %>%
+  filter(MaxLineNumber==LineNumber) %>%
+  inner_join(mortality,by="PatientID") %>%
+  select(CompPatientID) %>%
+  distinct()
+```
+
+```{r}
+colnames(visit)
+```
+
+```{r}
+# check_for_visit <- visit[visit$PatientID %in% ptids_with_control_arm_data,] %>%
+#   group_by(PatientID) %>%
+#   slice(which.max(ymd(VisitDate))) %>%
+#   ungroup() %>%
+#   inner_join(data_for_control_arm_with_stratify[data_for_control_arm_with_stratify$PatientID %in%   ptids_with_control_arm_data,],by="PatientID") %>%
+#   filter(ymd(VisitDate) - ymd(MaxEpisodeDate) >120)
+# write.table(check_for_visit,file="check_for_visit.txt",sep="\t",row.names = FALSE)
+```
+
+
+#Patients with structured activities 120 days after last drug episode
+```{r}
+comp_ptids_with_activity_after_last_episode<- visit[visit$PatientID %in% ptids_with_control_arm_data,] %>%
+  group_by(PatientID) %>%
+  slice(which.max(ymd(VisitDate))) %>%
+  ungroup() %>%
+  inner_join(data_for_control_arm_with_stratify[data_for_control_arm_with_stratify$PatientID %in%   ptids_with_control_arm_data,],by="PatientID") %>%
+  filter(ymd(VisitDate) - ymd(MaxEpisodeDate) >120)  %>%
+  select(CompPatientID) %>%
+  distinct()
+  
+```
+
+
+```{r}
+comp_ptids_for_uncensor<- union(union(comp_ptids_with_activity_after_last_episode,comp_ptids_with_new_lot),comp_ptids_with_no_lot_but_death)
+comp_ptids_for_uncensor
+```
+
+```{r}
+length(comp_ptids_with_activity_after_last_episode$CompPatientID)
+```
+```{r}
+length(comp_ptids_with_new_lot$CompPatientID)
+```
+
+
+```{r}
+length(comp_ptids_with_no_lot_but_death$CompPatientID)
+```
+
+
+```{r}
+"F004D1D91EE1C_3_Fulvestrant" %in% data_for_control_arm_with_stratify$CompPatientID
+```
+
+```{r}
+#data_for_control_arm_with_stratify$CompPatientID %in% c(comp_ptids_for_uncensor$CompPatientID)
+```
+
+
+```{r}
+data_for_control_arm_with_stratify$CensorState <- 0
+data_for_control_arm_with_stratify[data_for_control_arm_with_stratify$CompPatientID %in% comp_ptids_for_uncensor$CompPatientID,]$CensorState <- 1
+```
+
+```{r}
+tolower(c("Asf","sdsD"))
+```
+
+
+```{r}
+clean_data_for_control_drug_with_stratify <- data_for_control_arm_with_stratify[tolower(data_for_control_arm_with_stratify$LineName)==tolower(data_for_control_arm_with_stratify$DrugName),]
+nrow(clean_data_for_control_drug_with_stratify)
+```
+
+```{r}
+#write.table(clean_data_for_control_drug_with_stratify,"Clean_data_for_control_arm_with_stratification_and_censoring.tab",sep="\t",row.names = FALSE)
+```
+
+
+###Survival analysis!
+
+
+```{r}
+library(survival)
+library(survminer)
+```
+
+```{r}
+colnames(clean_data_for_control_drug_with_stratify)
+```
+
+
+
+
+```{r,fig.width=6,fig.height=6}
+ggsurvplot(survfit(Surv(EpisodeDiffDays, CensorState) ~ LineName, data=clean_data_for_control_drug_with_stratify),risk.table = TRUE,        # Add risk table
+  risk.table.col = "strata") + xlab("days") +ylab("TTD") +ggtitle("mBC patients receiving endocrine monotherapy after CDK4/6i")
+```
+
+```{r}
+fit_all<- survfit(Surv(EpisodeDiffDays, CensorState) ~ LineName + PRStatus, data=clean_data_for_control_drug_with_stratify)
+surv_median(fit_all)
+```
+
+
+
+
+```{r,fig.width=6,fig.height=6}
+ggsurvplot(survfit(Surv(EpisodeDiffDays, CensorState) ~ PRStatus, data=clean_data_for_control_drug_with_stratify[clean_data_for_control_drug_with_stratify$DrugName=="fulvestrant",]),risk.table = TRUE,        # Add risk table
+  risk.table.col = "strata",conf.int = TRUE,pval = TRUE) + xlab("days") +ylab("TTD") +ggtitle("Fulvestrant treatment after CDK4/6i stratified by PR status")
+```
+
+```{r,fig.width=6,fig.height=6}
+ggsurvplot(survfit(Surv(EpisodeDiffDays, CensorState) ~ PRStatus, data=clean_data_for_control_drug_with_stratify),risk.table = TRUE,        # Add risk table
+  risk.table.col = "strata",conf.int = TRUE,pval = TRUE) + xlab("days") +ylab("TTD") +ggtitle("mBC patients receiving endocrine monotherapy after CDK4/6i stratified by PR status") 
+```
+
+```{r}
+colnames(clean_data_for_control_drug_with_stratify)
+```
+
+```{r}
+unique(clean_data_for_control_drug_with_stratify$EcogValue)
+```
+
+
+
+```{r}
+clean_data_for_control_drug_with_stratify$ERStatus <- as.character(clean_data_for_control_drug_with_stratify$ERStatus)
+clean_data_for_control_drug_with_stratify$PRStatus <- as.character(clean_data_for_control_drug_with_stratify$PRStatus)
+clean_data_for_control_drug_with_stratify$DrugName <- as.character(clean_data_for_control_drug_with_stratify$DrugName)
+```
+
+
+ggforest to check the different stratificaiton factors
+```{r}
+model_all_param <- coxph( Surv(EpisodeDiffDays, CensorState) ~ ERStatus + PRStatus + HER2Status + EcogValue + PriorLineOfChemo,data = clean_data_for_control_drug_with_stratify )
+ggforest(model_all_param)
+```
+
+
+
+```{r}
+model_all_param_drugs <- coxph( Surv(EpisodeDiffDays, CensorState) ~ ERStatus + PRStatus + HER2Status + EcogValue + PriorLineOfChemo + DrugName,data = clean_data_for_control_drug_with_stratify )
+ggforest(model_all_param_drugs)
+```
+
+
+```{r}
+model_all_param_drugs <- coxph( Surv(EpisodeDiffDays, CensorState) ~  PRStatus +  EcogValue + PriorLineOfChemo + DrugName,data = clean_data_for_control_drug_with_stratify[clean_data_for_control_drug_with_stratify$ERStatus=="Positive" & clean_data_for_control_drug_with_stratify$HER2Status=="Negative",] )
+ggforest(model_all_param_drugs) +ggtitle("ER+/HER2- mBC")
+```
+
+```{r}
+model_all_param_drugs <- coxph( Surv(EpisodeDiffDays, CensorState) ~  PRStatus + DrugName,data = clean_data_for_control_drug_with_stratify[clean_data_for_control_drug_with_stratify$ERStatus=="Positive" & clean_data_for_control_drug_with_stratify$HER2Status=="Negative" & clean_data_for_control_drug_with_stratify$PriorLineOfChemo<=1 & clean_data_for_control_drug_with_stratify$EcogValue<=1,] )
+ggforest(model_all_param_drugs) 
+```
+
+
+```{r}
+fit_all<- survfit(Surv(EpisodeDiffDays, CensorState) ~ LineName + PRStatus, data=clean_data_for_control_drug_with_stratify)
+surv_median(fit_all)
+```
+
+```{r}
+mbc_with_pr<- surv_median(fit_all) %>%
+  mutate(value=paste(median," (",lower,"-",upper,")",sep="")) %>%
+  separate(strata,into=c("Drug","PRStatus"),sep=",") %>%
+  select(Drug,PRStatus,value) %>%
+  spread(PRStatus,value)
+mbc_with_pr
+```
+
+
+
+```{r}
+fit_er_her2<- survfit(Surv(EpisodeDiffDays, CensorState) ~ LineName + PRStatus, data=clean_data_for_control_drug_with_stratify[clean_data_for_control_drug_with_stratify$ERStatus=="Positive" & clean_data_for_control_drug_with_stratify$HER2Status=="Negative",])
+mbc_ERposHer2neg_with_pr<- surv_median(fit_er_her2) %>%
+  mutate(value=paste(median," (",lower,"-",upper,")",sep="")) %>%
+  separate(strata,into=c("Drug","PRStatus"),sep=",") %>%
+  select(Drug,PRStatus,value) %>%
+  spread(PRStatus,value)
+mbc_ERposHer2neg_with_pr
+```
+
+```{r}
+fit_er_her2_ecog_chemo<- survfit(Surv(EpisodeDiffDays, CensorState) ~ LineName + PRStatus, data=clean_data_for_control_drug_with_stratify[clean_data_for_control_drug_with_stratify$ERStatus=="Positive" & clean_data_for_control_drug_with_stratify$HER2Status=="Negative" & clean_data_for_control_drug_with_stratify$PriorLineOfChemo<=1 & clean_data_for_control_drug_with_stratify$EcogValue<=1 & !is.na(clean_data_for_control_drug_with_stratify$EcogValue),])
+mbc_ERposHer2negLowEcogLowChemo_with_pr<- surv_median(fit_er_her2_ecog_chemo) %>%
+  mutate(value=paste(median," (",lower,"-",upper,")",sep="")) %>%
+  separate(strata,into=c("Drug","PRStatus"),sep=",") %>%
+  select(Drug,PRStatus,value) %>%
+  spread(PRStatus,value)
+mbc_ERposHer2negLowEcogLowChemo_with_pr
+```
+
+
+
+```{r}
+write.csv(mbc_with_pr,file="mbc_with_pr.csv")
+write.csv(mbc_ERposHer2neg_with_pr,file="mbc_ERposHer2neg_with_pr.csv")
+write.csv(mbc_ERposHer2negLowEcogLowChemo_with_pr,file="mbc_ERposHer2negLowEcogLowChemo_with_pr.csv")
+
+clean_data_for_control_drug_with_stratify[clean_data_for_control_drug_with_stratify$PRStatus %in% c("Positive","Negative"),] %>%
+  group_by(LineName,PRStatus) %>%
+  summarise(n=n()) %>%
+  spread(PRStatus,n) %>%
+  write.csv(file="count_for_mbc_with_pr.csv")
+
+clean_data_for_control_drug_with_stratify[clean_data_for_control_drug_with_stratify$PRStatus %in% c("Positive","Negative") & clean_data_for_control_drug_with_stratify$ERStatus=="Positive" & clean_data_for_control_drug_with_stratify$HER2Status=="Negative",] %>%
+  group_by(LineName,PRStatus) %>%
+  summarise(n=n()) %>%
+  spread(PRStatus,n) %>%
+  write.csv(file="count_for_mbc_ERposHer2neg_with_pr.csv")
+
+clean_data_for_control_drug_with_stratify[clean_data_for_control_drug_with_stratify$PRStatus %in% c("Positive","Negative") & clean_data_for_control_drug_with_stratify$ERStatus=="Positive" & clean_data_for_control_drug_with_stratify$HER2Status=="Negative" & clean_data_for_control_drug_with_stratify$PriorLineOfChemo<=1 & clean_data_for_control_drug_with_stratify$EcogValue<=1 & !is.na(clean_data_for_control_drug_with_stratify$EcogValue),] %>%
+  group_by(LineName,PRStatus) %>%
+  summarise(n=n()) %>%
+  spread(PRStatus,n) %>%
+  write.csv(file="count_for_mbc_ERposHer2negLowEcogLowChemo_with_pr.csv")
+```
+
